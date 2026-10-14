@@ -104,6 +104,9 @@ read_log() {
             else if (line !~ /^\[[^]]+\] [0-9:]+ /) { msg = line; sub(/^\[[^]]+\] /, "", msg); err = msg }
             next
         }
+        if (line ~ /Apply complete!/) {
+            for (i = 1; i <= n; i++) if (existing[order[i]] && state[order[i]] == "") { state[order[i]] = "ok"; lbl[order[i]] = "ready (no changes needed)" }
+        }
         if (line ~ /Destruction complete/) removed++
         if (line ~ /Still destroying/ && match(line, /(aws|azurerm|google)_[a-z_]+/)) cur = substr(line, RSTART, RLENGTH)
 
@@ -116,6 +119,10 @@ read_log() {
 
         if (pending != "" && line ~ /with module\./) { state[name] = "fail"; lbl[name] = pending; pending = ""; next }
         if (!(name in kinds)) { set(name, kind, 0, 1, ""); lbl[name] = "waiting to start" }
+        if (line ~ /: Refreshing state/ && step[name] == 0 && state[name] == "") {
+            full = (kind == "kubeadm" ? 10 : (kind == "eks" ? 3 : 1))
+            step[name] = full; steps[name] = full; lbl[name] = "already built - checking for changes"; existing[name] = 1
+        }
         if (match(line, /\[[0-9hms]+ elapsed\]/)) { el[name] = substr(line, RSTART + 1, RLENGTH - 10) }
 
         if (kind == "kubeadm") {
@@ -145,6 +152,8 @@ read_log() {
     }
     END {
         if (pending != "" && err == "") err = pending
+        for (i = 1; i <= n; i++) { if (existing[order[i]]) ex++; if (step[order[i]] > 0 && !existing[order[i]]) fresh++ }
+        if (n > 0 && ex == n) status = (status == "terraform apply" ? "clusters already built - checking for changes" : status)
         printf "S|%s|%s|%s|%d|%s\n", start, action, status, done, err
         printf "D|%d|%s\n", removed, cur
         for (i = 1; i <= n; i++) {
@@ -196,14 +205,15 @@ fmt_dur() { # seconds -> "7m 05s" / "45s"
     if ((s >= 60)); then printf '%dm %02ds' $((s / 60)) $((s % 60)); else printf '%ds' "$s"; fi
 }
 
-bar() { # step steps -> ███░░░░░░░
-    local step=$1 steps=$2 filled i out=""
+bar() { # step steps state -> ━━━━━━━─── (green when ready, cyan while running)
+    local step=$1 steps=$2 state=$3 filled i done_part="" todo_part="" colour=36
     ((steps < 1)) && steps=1
-    filled=$((step * 10 / steps))
-    for ((i = 0; i < 10; i++)); do
-        if ((i < filled)); then out+="█"; else out+="░"; fi
+    filled=$((step * 12 / steps))
+    for ((i = 0; i < 12; i++)); do
+        if ((i < filled)); then done_part+="━"; else todo_part+="─"; fi
     done
-    printf '%s' "$out"
+    case $state in ok) colour=32 ;; fail) colour=31 ;; esac
+    printf '\033[%sm%s\033[2m%s\033[0m' "$colour" "$done_part" "$todo_part"
 }
 
 # ---------------------------------------------------------------
@@ -221,16 +231,18 @@ TIPS=(
     "kubectl rollout undo deployment/<name> rolls back to the previous version in seconds."
     "kubectl port-forward svc/<name> 8080:80 reaches a service without exposing it."
     "kubectl get all -n kube-system shows the pieces that make a cluster work."
-    "Flannel gives every node a /24 out of 10.244.0.0/16 and tunnels pod traffic over VXLAN (UDP 8472)."
-    "kubeadm writes the control plane as static pods in /etc/kubernetes/manifests on master1."
-    "etcd holds the whole cluster state - on master1: sudo ls /var/lib/etcd"
-    "containerd is the runtime here; on a node, sudo crictl ps lists the running containers."
     "A ServiceAccount token is just a JWT - paste one into jwt.io to see who it says you are."
     "RBAC is additive: there are no deny rules, only more or fewer permissions."
     "kubectl create deployment web --image=nginx --replicas=3 then kubectl expose deployment web --port=80"
     "Pod Security Admission: label a namespace pod-security.kubernetes.io/enforce=restricted to try it."
     "users.txt + ./up.sh shares these clusters with a teammate (admin, edit or view)."
     "./down.sh <sandbox> tears a sandbox down early - otherwise Pluralsight wipes it when it expires."
+)
+TIPS_KUBEADM=( # only shown while a kubeadm cluster is on screen
+    "Flannel gives every node a /24 out of 10.244.0.0/16 and tunnels pod traffic over VXLAN (UDP 8472)."
+    "kubeadm writes the control plane as static pods in /etc/kubernetes/manifests on master1."
+    "etcd holds the whole cluster state - on master1: sudo ls /var/lib/etcd"
+    "containerd is the runtime on the kubeadm nodes; on a node, sudo crictl ps lists the running containers."
 )
 CONTEXT_TIPS_EKS=(
     "Why is EKS slow? AWS builds a highly available control plane - API servers and etcd spread over 3 availability zones."
@@ -255,7 +267,7 @@ TIP_INDEX=$((RANDOM % ${#TIPS[@]}))
 declare -A LAST_PLAIN # for non-terminal output: last line printed per cluster
 
 render() {
-    local now sb out="" any_busy=0 phases=""
+    local now sb out="" any_busy=0 phases="" any_kubeadm=0
     now=$(date +%s)
     local width
     width=$(tput cols 2>/dev/null || echo 100)
@@ -301,7 +313,7 @@ render() {
         local k=0 m=0 mkind="" c
         for c in "${clusters[@]}"; do
             IFS='|' read -r _ _ ckind _ <<<"$c"
-            if [[ $ckind == kubeadm ]]; then k=$((k + 1)); else m=$((m + 1)); mkind=$ckind; fi
+            if [[ $ckind == kubeadm ]]; then k=$((k + 1)); any_kubeadm=1; else m=$((m + 1)); mkind=$ckind; fi
         done
         if ((done)); then
             head="\033[32mready\033[0m${elapsed:+ · took $(fmt_dur "$elapsed")}"
@@ -312,7 +324,9 @@ render() {
             est_src=${est#* }
             left=$((est_s - ${elapsed:-0}))
             head="${start:+started ${start%:*} · }$(fmt_dur "${elapsed:-0}") elapsed"
-            if ((${#clusters[@]})); then
+            if [[ $status == "clusters already built"* ]]; then
+                head+=" · $status"
+            elif ((${#clusters[@]})); then
                 if ((left > 60)); then
                     head+=" · about $(((left + 59) / 60)) min left"
                 else
@@ -335,9 +349,9 @@ render() {
                 *) if ((busy)); then icon=${SPIN[TICK % ${#SPIN[@]}]}; else icon="\033[33m•\033[0m"; fi ;;
             esac
             local line
-            line=$(printf '%-12s %s %2d/%-2d %s' "$cname" "$(bar "$step" "$steps")" "$step" "$steps" "$label")
+            line=$(printf '%-12s %s %2d/%-2d %s' "$cname" "$(bar "$step" "$steps" "$cstate")" "$step" "$steps" "$label")
             [[ $cstate == run && -n $cel ]] && line+="  ($cel)"
-            out+="   $icon ${line:0:$((width - 6))}\n"
+            out+="   $icon ${line:0:$((width + 20))}\n"
             phases+=" $label"
 
             # non-terminal: print each change once
@@ -358,15 +372,19 @@ render() {
         [[ $phases == *"EKS control plane"* ]] && ctx+=("${CONTEXT_TIPS_EKS[@]}")
         [[ $phases == *"kubeadm init"* || $phases == *"joining"* ]] && ctx+=("${CONTEXT_TIPS_KUBEADM[@]}")
         [[ $phases == *"AKS"* || $phases == *"GKE"* ]] && ctx+=("${CONTEXT_TIPS_MANAGED[@]}")
+        local -a pool=("${TIPS[@]}")
+        ((any_kubeadm)) && pool+=("${TIPS_KUBEADM[@]}")
         if ((${#ctx[@]})) && (((TICK / 12) % 2 == 1)); then
             TIP=${ctx[RANDOM % ${#ctx[@]}]}
         else
-            TIP_INDEX=$(((TIP_INDEX + 1) % ${#TIPS[@]}))
-            TIP=${TIPS[TIP_INDEX]}
+            TIP_INDEX=$(((TIP_INDEX + 1) % ${#pool[@]}))
+            TIP=${pool[TIP_INDEX]}
         fi
     fi
     if ((any_busy)); then
-        out+=" 💡 ${TIP:0:$((width - 5))}\n\n"
+        local wrapped
+        wrapped=$(fold -s -w $((width - 5)) <<<"$TIP" | head -3 | sed '1!s/^/    /')
+        out+=" 💡 ${wrapped//$'\n'/\\n}\n\n"
         if ((EMBEDDED)); then
             out+=" \033[2mCtrl-C stops the build safely (Terraform saves its state). Full log: .sandboxes/<sandbox>/log\033[0m\n"
         else
@@ -414,6 +432,9 @@ if [[ -t 1 ]]; then
     trap - EXIT
     printf '%b' "$RENDER_OUT"
 fi
+# Started by up.sh/down.sh: they print the results, the build sends the notification
+[[ -n ${WATCH_ATTACHED:-} ]] && exit 0
+
 summary=""
 for sb in "${SANDBOXES[@]}"; do
     s=$(read_log "$sb" | grep '^S|')

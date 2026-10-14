@@ -22,10 +22,9 @@ destroy_sandbox() {
 }
 
 select_sandboxes "$@"
-run_sandboxes destroy_sandbox
-merge_kubeconfigs
+run_sandboxes destroy_sandbox merge_kubeconfigs
 
 if ((${#FAILED[@]})); then
     echo "Failed: ${FAILED[*]}"
-    exit 1
 fi
+((${#FAILED[@]} == 0 && RUN_FAILED == 0)) || exit 1

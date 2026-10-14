@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 #
-# One-time setup on a new machine: installs what up.sh needs into ~/.local/bin
-# (no sudo). Anything already installed is left alone.
+# Installs what up.sh needs into ~/.local/bin (no sudo). up.sh runs this by
+# itself the first time it finds a tool missing - you don't need to run it.
+# Anything already installed is left alone.
 #
-#   ./setup.sh            AWS CLI, Terraform, kubectl (+ checks the basics)
-#   ./setup.sh gcp        also the Google Cloud CLI + GKE auth plugin
+#   setup.sh            AWS CLI, Terraform, kubectl (+ checks the basics)
+#   setup.sh gcp        also the Google Cloud CLI + GKE auth plugin
 #
 # Azure needs no extra tools when labs.env has the service principal
 # (USERNAME / CLIENT_ID / CLIENT_SECRET).
@@ -97,6 +98,6 @@ fi
 echo
 if ! grep -qs '.local/bin' "$HOME/.bashrc" "$HOME/.profile"; then
     echo 'export PATH=$HOME/.local/bin:$PATH' >>"$HOME/.bashrc"
-    echo "Added ~/.local/bin to your PATH in ~/.bashrc (open a new terminal, or: source ~/.bashrc)"
+    echo "Added ~/.local/bin to your PATH in ~/.bashrc (for aws/kubectl in new terminals)"
 fi
-echo "Ready. Next: cp labs.env.example labs.env (if you haven't), fill it in, then ./up.sh"
+[[ -n ${FROM_UP_SH:-} ]] || echo "Ready. Next: cp labs.env.example labs.env (if you haven't), fill it in, then ./up.sh"

@@ -56,15 +56,30 @@ In a terminal, `up.sh` and `down.sh` show a live dashboard instead of scrolling 
 - **Time left:** estimated from your own last build with the same cloud and cluster counts, or from typical times until you have one.
 - **Tips:** they rotate while you wait. Some match the step in progress, such as why EKS's control plane takes so long.
 - **When it finishes:** you get a Windows notification and a beep, so you can work on something else meanwhile.
-- **Ctrl-C** stops the build safely: Terraform saves its state, and `./up.sh` carries on from there.
+- **Ctrl-C** only closes the view. The build keeps running (see below).
 
-From another terminal, `./watch.sh` shows the same view for any build that's running (Ctrl-C there only closes the view). `NO_WATCH=1 ./up.sh` gives plain output instead. Plain output is also used automatically when the output isn't a terminal, for example in CI or when redirected to a file.
+`NO_WATCH=1 ./up.sh` gives plain output instead. Plain output is also used automatically when the output isn't a terminal, for example in CI or when redirected to a file.
+
+### If the terminal closes or times out
+
+Builds and destroys run in the background, in their own session, so a closed window, a dropped SSH connection or Ctrl-C never kills them. Only the sign-in steps (Azure device code, GCP browser sign-in) run in your terminal first.
+
+| Command | What it does |
+| ------- | ------------ |
+| `./status.sh` | Every sandbox on this machine (building, ready, failed or destroyed) and how many nodes of each cluster are Ready right now |
+| `./watch.sh` | The live dashboard again, for whatever is running |
+| `./up.sh aws1` while `aws1` is running | Reattaches to its progress. It doesn't start a second build |
+| `./stop.sh aws1` | Stops a background build or destroy safely. Terraform saves its state, and `./up.sh aws1` carries on later |
+
+The "done" notification comes from the background build itself, so it arrives even if no terminal is open. The full output of the last run is in `.sandboxes/run-<sandboxes>.log`.
 
 Context names are `<sandbox>-<type><n>`, where the type is `k` (kubeadm), `eks`, `aks` or `gke`.
 
 | Command | What it does |
 | ------- | ------------ |
 | `./up.sh` again | Safe to re-run. Existing clusters are kept; changed counts are applied |
+| `./status.sh` | Where every sandbox and cluster stands, at any time |
+| `./stop.sh aws1` | Stop a running build safely |
 | `./down.sh azure1` | Destroy a sandbox's clusters early. Sandboxes also clean themselves up when they expire |
 
 ## Credentials per cloud
@@ -172,6 +187,8 @@ The AWS side has been checked with `terraform plan` against a live sandbox. The 
 ```text
 up.sh / down.sh / lib.sh          entry points
 watch.sh                          live progress dashboard (started by up.sh / down.sh)
+status.sh / stop.sh               state of every sandbox / stop a background build
+setup.sh                          installs AWS CLI, Terraform, kubectl (up.sh runs it when needed)
 labs.env.example                  template (labs.env is git-ignored)
 users.txt.example                 template for shared users (users.txt is git-ignored)
 access.sh                         users.txt -> accounts, firewall entries, share/ bundles

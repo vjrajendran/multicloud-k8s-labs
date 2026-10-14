@@ -151,30 +151,33 @@ deploy_sandbox() {
     echo "[$sb] $(date +%T) done"
 }
 
+# Runs at the end of the background build: kubeconfigs, bundles, summary
+finish_up() {
+    merge_kubeconfigs
+    build_bundles
+
+    echo
+    if [[ -f $MERGED_KUBECONFIG ]]; then
+        echo "Clusters (kubeconfig: $MERGED_KUBECONFIG)"
+        for ctx in $(KUBECONFIG=$MERGED_KUBECONFIG kubectl config get-contexts -o name | sort); do
+            nodes=$(KUBECONFIG=$MERGED_KUBECONFIG kubectl --context "$ctx" --request-timeout=15s \
+                get nodes --no-headers 2>/dev/null || true)
+            printf "  %-14s %s/%s nodes Ready\n" "$ctx" \
+                "$(awk '$2 == "Ready"' <<<"$nodes" | grep -c . || true)" "$(grep -c . <<<"$nodes" || true)"
+        done
+        echo
+        echo "  export KUBECONFIG=$MERGED_KUBECONFIG"
+        echo "  kubectl --context <name> get nodes"
+    fi
+    print_bundles
+}
+
 select_sandboxes "$@"
 load_users
-run_sandboxes deploy_sandbox
-merge_kubeconfigs
-build_bundles
-
-echo
-if [[ -f $MERGED_KUBECONFIG ]]; then
-    echo "Clusters (kubeconfig: $MERGED_KUBECONFIG)"
-    for ctx in $(KUBECONFIG=$MERGED_KUBECONFIG kubectl config get-contexts -o name | sort); do
-        nodes=$(KUBECONFIG=$MERGED_KUBECONFIG kubectl --context "$ctx" --request-timeout=15s \
-            get nodes --no-headers 2>/dev/null || true)
-        printf "  %-14s %s/%s nodes Ready\n" "$ctx" \
-            "$(awk '$2 == "Ready"' <<<"$nodes" | grep -c . || true)" "$(grep -c . <<<"$nodes" || true)"
-    done
-    echo
-    echo "  export KUBECONFIG=$MERGED_KUBECONFIG"
-    echo "  kubectl --context <name> get nodes"
-fi
-
-print_bundles
+run_sandboxes deploy_sandbox finish_up
 
 if ((${#FAILED[@]})); then
     echo
     echo "Failed: ${FAILED[*]} - fix labs.env if needed, then re-run: ./up.sh ${FAILED[*]}"
-    exit 1
 fi
+((${#FAILED[@]} == 0 && RUN_FAILED == 0)) || exit 1

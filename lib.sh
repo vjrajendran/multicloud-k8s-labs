@@ -8,6 +8,8 @@ KUBE_DIR=$HOME/.kube/multicloud        # one kubeconfig per cluster
 MERGED_KUBECONFIG=$HOME/.kube/multicloud.yaml
 LABS_ENV=${LABS_ENV:-$ROOT/labs.env}
 CLOUDS=(aws azure gcp)
+DETACHED=0
+RUN_FAILED=0
 SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o LogLevel=ERROR)
 
 # Never pick up credentials from your shell - each sandbox gets its own
@@ -67,6 +69,10 @@ sandbox_enabled() {
 select_sandboxes() {
     SANDBOXES=()
     local sb c n
+    if [[ ${1:-} == --detached ]]; then
+        DETACHED=1 # the background half started by run_sandboxes
+        shift
+    fi
     if (($#)); then
         for sb in "$@"; do
             case $(cloud_of "$sb") in
@@ -292,22 +298,85 @@ init_terraform() {
     done
 }
 
-# Prepare every selected sandbox, then run "$1 <sandbox>" for the ready ones
-# in parallel, each logging to .sandboxes/<sandbox>/log
-run_sandboxes() {
-    local action=$1 sb fd
-    local -a ready=()
-    FAILED=()
+# First run on a new machine: install what's missing (AWS CLI, Terraform,
+# kubectl, gcloud for GCP) into ~/.local/bin via setup.sh - no sudo needed
+ensure_tools() {
+    local -a missing=() args=()
+    local sb tool
+    for tool in terraform kubectl curl ssh python3 flock; do
+        command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
+    done
+    for sb in "${SANDBOXES[@]}"; do
+        case $(cloud_of "$sb") in
+            aws) command -v aws >/dev/null 2>&1 || missing+=(aws) ;;
+            gcp)
+                if [[ -z $(cfg "$sb" CREDENTIALS) ]] && ! command -v gcloud >/dev/null 2>&1; then
+                    missing+=(gcloud)
+                    args=(gcp)
+                fi
+                ;;
+        esac
+    done
+    ((${#missing[@]})) || return 0
 
-    # One up.sh/down.sh per sandbox at a time - two would fight over its state and log
+    echo "First run on this machine - installing: $(printf '%s\n' "${missing[@]}" | sort -u | xargs)"
+    FROM_UP_SH=1 "$ROOT/setup.sh" "${args[@]}" ||
+        die "Couldn't install everything - fix what's reported above, then run ./up.sh again"
+    PATH=$HOME/.local/bin:$PATH # may not have existed when lib.sh started
+    [[ -d $HOME/google-cloud-sdk/bin ]] && PATH=$HOME/google-cloud-sdk/bin:$PATH
+    hash -r
+    echo
+}
+
+sandbox_busy() {
+    [[ -e $RUN_DIR/$1/lock ]] && ! flock -n "$RUN_DIR/$1/lock" true 2>/dev/null
+}
+
+# Run "$1 <sandbox>" for every selected sandbox in parallel, then "$2" once.
+#
+# Split in two so a closed or timed-out terminal never kills a build:
+#   foreground  installs tools, checks credentials (may ask you to sign in),
+#               starts the background half, then shows its progress
+#   background  this script again with --detached, in its own session: runs
+#               the sandboxes, then "$2", and sends the "done" notification
+run_sandboxes() {
+    if ((DETACHED)); then
+        run_detached "$@"
+    else
+        run_foreground "$@"
+    fi
+}
+
+run_foreground() {
+    local sb fd rc
+    local -a ready=() busy=() fds=()
+    FAILED=()
+    RUN_FAILED=0
+
+    ensure_tools
+
+    # Already running? Show it instead of starting a second build
+    for sb in "${SANDBOXES[@]}"; do
+        if sandbox_busy "$sb"; then busy+=("$sb"); fi
+    done
+    if ((${#busy[@]} == ${#SANDBOXES[@]})); then
+        echo "${busy[*]}: already running in the background - showing its progress."
+        [[ -t 1 ]] && "$ROOT/watch.sh" "${busy[@]}"
+        echo "./status.sh shows every sandbox and cluster."
+        exit 0
+    elif ((${#busy[@]})); then
+        die "${busy[*]} already running in the background - start the others on their own, e.g. ./$(basename "$0") ${SANDBOXES[*]/${busy[0]}/}"
+    fi
+
+    # Hold the locks while checking credentials (a new sandbox resets its state)
     for sb in "${SANDBOXES[@]}"; do
         mkdir -p "$RUN_DIR/$sb"
         exec {fd}>"$RUN_DIR/$sb/lock"
-        flock -n "$fd" || die "$sb is already being built or destroyed by another up.sh/down.sh - wait for it to finish"
+        flock -n "$fd" || die "$sb was just started by another up.sh/down.sh"
+        fds+=("$fd")
     done
 
     # Not "if (prepare_sandbox)" - that would switch off set -e inside it
-    local rc
     for sb in "${SANDBOXES[@]}"; do
         set +e
         (prepare_sandbox "$sb")
@@ -315,37 +384,82 @@ run_sandboxes() {
         set -e
         if ((rc == 0)); then ready+=("$sb"); else FAILED+=("$sb"); fi
     done
+    for fd in "${fds[@]}"; do exec {fd}>&-; done
     ((${#ready[@]})) || return 0
+
+    # The build itself: own session, no terminal - survives a closed window
+    local run_log pid i all
+    run_log=$RUN_DIR/run-$(IFS=-; echo "${ready[*]}").log
+    rm -f "$run_log.failed"
+    setsid "$ROOT/$(basename "$0")" --detached "${ready[@]}" </dev/null >"$run_log" 2>&1 &
+    pid=$!
+    for sb in "${ready[@]}"; do echo "$pid" >"$RUN_DIR/$sb/pid"; done
+
+    # Wait until it holds its locks (or failed straight away)
+    for i in $(seq 1 50); do
+        all=1
+        for sb in "${ready[@]}"; do sandbox_busy "$sb" || all=0; done
+        ((all)) && break
+        [[ -f $run_log.failed ]] && break
+        sleep 0.2
+    done
+
+    echo
+    echo "Running in the background - closing this terminal won't stop it."
+    if [[ -t 1 && -z ${NO_WATCH:-} ]]; then
+        WATCH_ATTACHED=1 "$ROOT/watch.sh" "${ready[@]}" || true
+    else
+        echo "Progress: ./watch.sh   (or tail -f .sandboxes/<sandbox>/log)"
+        wait "$pid" || true
+    fi
+
+    # View closed with Ctrl-C while the build carries on
+    for sb in "${ready[@]}"; do
+        if sandbox_busy "$sb"; then
+            echo
+            echo "Still running in the background:"
+            echo "  ./watch.sh           live progress again"
+            echo "  ./status.sh          every sandbox and its clusters"
+            echo "  ./stop.sh ${ready[0]}      stop it safely"
+            exit 0
+        fi
+    done
+    wait "$pid" 2>/dev/null || true
+    cat "$run_log"
+    [[ -s $run_log.failed ]] && RUN_FAILED=1
+    return 0
+}
+
+run_detached() {
+    local action=$1 finish=${2:-} sb fd run_log
+    local -a fds=()
+    FAILED=()
+    run_log=$RUN_DIR/run-$(IFS=-; echo "${SANDBOXES[*]}").log
+    trap 'echo "${FAILED[*]}" >"'"$run_log"'.failed"' EXIT
+
+    for sb in "${SANDBOXES[@]}"; do
+        mkdir -p "$RUN_DIR/$sb"
+        exec {fd}>"$RUN_DIR/$sb/lock"
+        if ! flock -n "$fd"; then
+            FAILED+=("$sb")
+            die "$sb is already being built or destroyed"
+        fi
+        fds+=("$fd")
+    done
 
     init_terraform
 
     declare -A pids ok
-    for sb in "${ready[@]}"; do
+    for sb in "${SANDBOXES[@]}"; do
         ("$action" "$sb") >"$RUN_DIR/$sb/log" 2>&1 &
         pids[$sb]=$!
     done
-
-    # Live dashboard in a terminal (NO_WATCH=1 turns it off); plain lines otherwise
-    local watcher=""
-    if [[ -t 1 && -z ${NO_WATCH:-} ]]; then
-        "$ROOT/watch.sh" --embedded "${ready[@]}" &
-        watcher=$!
-    else
-        echo
-        echo "Started $(date +%H:%M). Progress: tail -f .sandboxes/<sandbox>/log"
-        for sb in "${ready[@]}"; do echo "  $sb -> .sandboxes/$sb/log"; done
-    fi
-
-    for sb in "${ready[@]}"; do
+    for sb in "${SANDBOXES[@]}"; do
         if wait "${pids[$sb]}"; then ok[$sb]=1; else ok[$sb]=0; fi
     done
-    if [[ -n $watcher ]]; then
-        kill "$watcher" 2>/dev/null
-        wait "$watcher" 2>/dev/null || true
-    fi
 
     local summary=""
-    for sb in "${ready[@]}"; do
+    for sb in "${SANDBOXES[@]}"; do
         if ((ok[$sb])); then
             echo "✓ $sb done ($(date +%H:%M))"
             summary+="$sb ✓  "
@@ -357,7 +471,13 @@ run_sandboxes() {
             summary+="$sb ✗  "
         fi
     done
-    [[ -t 1 ]] && "$ROOT/watch.sh" --notify "Kubernetes labs" "$summary"
+    [[ -n $finish ]] && "$finish"
+
+    # Release the locks first: the notification lingers for a few seconds and
+    # would otherwise keep the sandboxes looking "busy"
+    echo "${FAILED[*]}" >"$run_log.failed"
+    for fd in "${fds[@]}"; do exec {fd}>&-; done
+    "$ROOT/watch.sh" --notify "Kubernetes labs" "$summary"
     return 0
 }
 
