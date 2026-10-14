@@ -293,9 +293,16 @@ init_terraform() {
 # Prepare every selected sandbox, then run "$1 <sandbox>" for the ready ones
 # in parallel, each logging to .sandboxes/<sandbox>/log
 run_sandboxes() {
-    local action=$1 sb
+    local action=$1 sb fd
     local -a ready=()
     FAILED=()
+
+    # One up.sh/down.sh per sandbox at a time - two would fight over its state and log
+    for sb in "${SANDBOXES[@]}"; do
+        mkdir -p "$RUN_DIR/$sb"
+        exec {fd}>"$RUN_DIR/$sb/lock"
+        flock -n "$fd" || die "$sb is already being built or destroyed by another up.sh/down.sh - wait for it to finish"
+    done
 
     # Not "if (prepare_sandbox)" - that would switch off set -e inside it
     local rc
@@ -310,24 +317,63 @@ run_sandboxes() {
 
     init_terraform
 
-    echo
-    echo "Started $(date +%H:%M). Progress: tail -f .sandboxes/<sandbox>/log"
-    declare -A pids
+    declare -A pids ok
     for sb in "${ready[@]}"; do
         ("$action" "$sb") >"$RUN_DIR/$sb/log" 2>&1 &
         pids[$sb]=$!
-        echo "  $sb -> .sandboxes/$sb/log"
     done
 
+    # Live dashboard in a terminal (NO_WATCH=1 turns it off); plain lines otherwise
+    local watcher=""
+    if [[ -t 1 && -z ${NO_WATCH:-} ]]; then
+        "$ROOT/watch.sh" --embedded "${ready[@]}" &
+        watcher=$!
+    else
+        echo
+        echo "Started $(date +%H:%M). Progress: tail -f .sandboxes/<sandbox>/log"
+        for sb in "${ready[@]}"; do echo "  $sb -> .sandboxes/$sb/log"; done
+    fi
+
     for sb in "${ready[@]}"; do
-        if wait "${pids[$sb]}"; then
+        if wait "${pids[$sb]}"; then ok[$sb]=1; else ok[$sb]=0; fi
+    done
+    if [[ -n $watcher ]]; then
+        kill "$watcher" 2>/dev/null
+        wait "$watcher" 2>/dev/null || true
+    fi
+
+    local summary=""
+    for sb in "${ready[@]}"; do
+        if ((ok[$sb])); then
             echo "✓ $sb done ($(date +%H:%M))"
+            summary+="$sb ✓  "
+            [[ $action == deploy_sandbox ]] && record_history "$sb"
         else
             echo "✗ $sb failed - last lines of .sandboxes/$sb/log:"
             tail -n 15 "$RUN_DIR/$sb/log" | sed 's/^/    /'
             FAILED+=("$sb")
+            summary+="$sb ✗  "
         fi
     done
+    [[ -t 1 ]] && "$ROOT/watch.sh" --notify "Kubernetes labs" "$summary"
+    return 0
+}
+
+# How long a real build took, by shape (cloud + cluster counts), so the
+# dashboard's "about N min left" learns from your own runs
+record_history() {
+    local sb=$1 log start end secs k m
+    log=$(sed 's/\x1b\[[0-9;]*m//g' "$RUN_DIR/$sb/log")
+    # Only builds that created clusters - a quick re-run would skew the estimate
+    grep -qE 'Resources: ([5-9]|[1-9][0-9]+) added' <<<"$log" || return 0
+    start=$(sed -n "s/^\[$sb\] \([0-9:]*\) terraform apply.*/\1/p" <<<"$log" | head -1)
+    end=$(sed -n "s/^\[$sb\] \([0-9:]*\) done$/\1/p" <<<"$log" | tail -1)
+    [[ -n $start && -n $end ]] || return 0
+    secs=$(($(date -d "$end" +%s) - $(date -d "$start" +%s)))
+    ((secs > 0)) || return 0
+    k=$(find "$KUBE_DIR" -maxdepth 1 -name "$sb-k[0-9]*.yaml" | wc -l)
+    m=$(($(find "$KUBE_DIR" -maxdepth 1 -name "$sb-*.yaml" | wc -l) - k))
+    echo "$(cloud_of "$sb"):k$k:m$m $secs" >>"$RUN_DIR/history"
 }
 
 # Rebuild ~/.kube/multicloud.yaml from the per-cluster files
