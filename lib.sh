@@ -15,7 +15,9 @@ unset AWS_PROFILE AWS_DEFAULT_PROFILE AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AW
       ARM_CLIENT_ID ARM_CLIENT_SECRET ARM_TENANT_ID ARM_SUBSCRIPTION_ID AZURE_CONFIG_DIR \
       GOOGLE_APPLICATION_CREDENTIALS GOOGLE_CREDENTIALS CLOUDSDK_CONFIG TF_WORKSPACE
 
-# Linux CLIs installed in your home directory win over Windows ones on the WSL PATH
+# Tools installed by setup.sh, and Linux CLIs in your home directory, win over
+# Windows ones on the WSL PATH
+[[ -d $HOME/.local/bin ]] && PATH=$HOME/.local/bin:$PATH
 [[ -x $HOME/.venvs/azure-cli/bin/az ]] && PATH=$HOME/.venvs/azure-cli/bin:$PATH
 [[ -d $HOME/google-cloud-sdk/bin ]] && PATH=$HOME/google-cloud-sdk/bin:$PATH
 
