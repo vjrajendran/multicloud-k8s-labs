@@ -1,0 +1,14 @@
+# cp users.txt.example users.txt   (users.txt is git-ignored)
+#
+# People who get access to every cluster. Edit this whenever someone sends
+# you their public IP and SSH public key, then run ./up.sh - it takes about a
+# minute when the clusters already exist. Delete a line to revoke access.
+#
+#   name    lowercase, used as their Kubernetes and SSH user name
+#   role    admin = cluster-admin | edit = change workloads | view = read-only
+#   ip      their public IP (or CIDR); several: 1.2.3.4,5.6.7.8
+#   key     their SSH public key (the whole line from their ~/.ssh/id_ed25519.pub)
+#
+# name     role    ip               key
+# alice    admin   203.0.113.10     ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... alice@laptop
+# bob      admin   198.51.100.7     ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAB... bob@desktop
