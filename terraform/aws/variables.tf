@@ -61,3 +61,9 @@ variable "shared_cidrs" {
   type        = list(string)
   default     = []
 }
+
+variable "cloud_lb" {
+  description = "AWS cloud controller on the kubeadm clusters, so LoadBalancer Services get real load balancers"
+  type        = bool
+  default     = false
+}

@@ -45,3 +45,9 @@ variable "repo_url" {
 variable "repo_branch" {
   type = string
 }
+
+variable "cloud_lb" {
+  description = "Prepare the nodes for the AWS cloud controller (LoadBalancer Services)"
+  type        = bool
+  default     = false
+}

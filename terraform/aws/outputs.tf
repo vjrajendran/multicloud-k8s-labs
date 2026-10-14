@@ -18,9 +18,11 @@ output "clusters" {
   value = merge(
     {
       for name, c in module.kubeadm : name => {
-        type = "kubeadm"
-        ssh  = "ssh -i keys/${terraform.workspace}.pem ubuntu@${c.master_public_ip}"
-        ips  = c.private_ips
+        type         = "kubeadm"
+        ssh          = "ssh -i keys/${terraform.workspace}.pem ubuntu@${c.master_public_ip}"
+        ips          = c.private_ips
+        provider_ids = c.provider_ids
+        cloud_lb     = var.cloud_lb
       }
     },
     {

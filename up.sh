@@ -117,6 +117,31 @@ KUBE
     )
 }
 
+# kubeadm + <SANDBOX>_CLOUD_LB=1 (AWS): tell every node which EC2 instance it is
+# (spec.providerID, settable once) and run the AWS cloud controller manager, so
+# Services of type LoadBalancer get real AWS load balancers - as on EKS.
+# Runs on master1 over SSH, so a TLS-inspecting VPN doesn't get in the way.
+enable_cloud_controller() {
+    local ctx=$1 ip=$2 pem=$3 ids node pid
+    ids=$(tf_in aws output -json clusters | python3 -I -c '
+import json, sys
+for node, pid in json.load(sys.stdin)[sys.argv[1]]["provider_ids"].items():
+    print(node, pid)' "$ctx")
+    {
+        echo 'set -euo pipefail'
+        echo 'export KUBECONFIG=$HOME/.kube/config'
+        while read -r node pid; do
+            echo "[[ -n \$(kubectl get node $node -o jsonpath='{.spec.providerID}') ]] ||"
+            echo "    kubectl patch node $node -p '{\"spec\":{\"providerID\":\"$pid\"}}' >/dev/null"
+        done <<<"$ids"
+        echo "kubectl apply -f - >/dev/null <<'MANIFEST'"
+        sed "s/__CLUSTER__/$ctx/" "$ROOT/k8s/aws-cloud-controller-manager.yaml"
+        echo 'MANIFEST'
+        echo 'kubectl -n kube-system rollout status daemonset/aws-cloud-controller-manager --timeout=3m >/dev/null'
+    } | ssh -i "$pem" "${SSH_OPTS[@]}" "ubuntu@$ip" 'bash -s'
+    echo "[$ctx] AWS cloud controller running - LoadBalancer Services now get AWS load balancers"
+}
+
 deploy_sandbox() {
     local sb=$1 cloud name ip kind region server ca cert key
     cloud=$(cloud_of "$sb")
@@ -142,6 +167,9 @@ deploy_sandbox() {
     while read -r name ip || [[ -n $name ]]; do  # last line has no newline
         write_kubeadm_kubeconfig "$name" "$ip" "$KEY_DIR/$sb.pem"
         grant_kubeadm_access "$name" "$ip" "$KEY_DIR/$sb.pem" </dev/null
+        if [[ $cloud == aws && $(cfg "$sb" CLOUD_LB) =~ ^(1|true)$ ]]; then
+            enable_cloud_controller "$name" "$ip" "$KEY_DIR/$sb.pem" </dev/null
+        fi
     done < <(tf_in "$cloud" output -raw kubeadm)
     while read -r name kind region server ca cert key || [[ -n $name ]]; do
         write_managed_kubeconfig "$name" "$kind" "$region" "$server" "$ca" "$cert" "$key"
@@ -160,8 +188,11 @@ finish_up() {
     if [[ -f $MERGED_KUBECONFIG ]]; then
         echo "Clusters (kubeconfig: $MERGED_KUBECONFIG)"
         for ctx in $(KUBECONFIG=$MERGED_KUBECONFIG kubectl config get-contexts -o name | sort); do
-            nodes=$(KUBECONFIG=$MERGED_KUBECONFIG kubectl --context "$ctx" --request-timeout=15s \
-                get nodes --no-headers 2>/dev/null || true)
+            if ! nodes=$(KUBECONFIG=$MERGED_KUBECONFIG kubectl --context "$ctx" --request-timeout=15s \
+                get nodes --no-headers 2>/dev/null); then
+                printf "  %-14s unreachable from here (IP changed? re-run ./up.sh %s)\n" "$ctx" "${ctx%%-*}"
+                continue
+            fi
             printf "  %-14s %s/%s nodes Ready\n" "$ctx" \
                 "$(awk '$2 == "Ready"' <<<"$nodes" | grep -c . || true)" "$(grep -c . <<<"$nodes" || true)"
         done

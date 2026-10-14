@@ -15,6 +15,22 @@ destroy_sandbox() {
     local -a vars
     mapfile -t vars < <(tf_vars "$sb")
 
+    # Load balancers made by Kubernetes (LoadBalancer Services, e.g. an ingress
+    # controller - on EKS/AKS/GKE, and on kubeadm with <SANDBOX>_CLOUD_LB=1) aren't
+    # in Terraform's state. Delete them first or they're left behind (on GCP they
+    # would even block deleting the network)
+    local f ns name
+    for f in "$KUBE_DIR/$sb"-*.yaml; do
+        [[ -f $f ]] || continue
+        kubectl --kubeconfig "$f" --request-timeout=20s get services -A \
+            -o jsonpath='{range .items[?(@.spec.type=="LoadBalancer")]}{.metadata.namespace} {.metadata.name}{"\n"}{end}' 2>/dev/null |
+            while read -r ns name; do
+                [[ -n $name ]] || continue
+                echo "[$sb] $(date +%T) deleting load balancer $ns/$name in $(basename "$f" .yaml)"
+                kubectl --kubeconfig "$f" -n "$ns" delete service "$name" --timeout=5m || true
+            done
+    done
+
     echo "[$sb] $(date +%T) terraform destroy"
     tf_in "$cloud" destroy -auto-approve -input=false "${vars[@]}"
     rm -f "$KUBE_DIR/$sb"-*.yaml

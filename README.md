@@ -106,6 +106,35 @@ curl -sSL https://sdk.cloud.google.com | bash -s -- --disable-prompts
 
 The scripts find both install locations automatically.
 
+## Demo: a public website
+
+`examples/web-demo/demo.sh` puts a small website on a managed cluster (EKS, AKS or GKE) and prints its public URL. The request path is: cloud load balancer → Traefik ingress controller → Ingress → nginx (3 pods).
+
+```bash
+examples/web-demo/demo.sh aws1-eks1           # about 4 minutes on EKS, most of it AWS DNS and health checks
+examples/web-demo/demo.sh aws1-eks1 delete    # removes it, load balancer included
+```
+
+The page shows which pod answered, so refreshing shows the load balancing.
+
+**kubeadm clusters** have no cloud integration of their own, so a `LoadBalancer` Service would stay `<pending>`. Turn on the AWS cloud controller manager, the component EKS runs for you:
+
+```bash
+# labs.env
+AWS1_CLOUD_LB=1      # then ./up.sh aws1 - a few minutes, nothing is rebuilt
+
+examples/web-demo/demo.sh aws1-k1
+kubectl --context aws1-k1 -n traefik get svc traefik    # TYPE LoadBalancer, EXTERNAL-IP ...elb.amazonaws.com
+```
+
+What the setting does:
+- **Terraform** gives the nodes an IAM role for load balancers, tags them for the cluster, and adds a security group that the controller writes its rules into. Terraform doesn't manage that group's rules, so it never undoes them.
+- **`up.sh`** sets every node's `spec.providerID` (which EC2 instance it is) and installs the controller from `k8s/aws-cloud-controller-manager.yaml`. It does this over SSH, so a VPN doesn't get in the way.
+
+After that, any `type: LoadBalancer` Service creates an AWS Network Load Balancer with `service.beta.kubernetes.io/aws-load-balancer-type: nlb`, or a Classic Load Balancer without it. Deleting the Service deletes the load balancer. The NodePort in `kubectl get svc` (for example `80:30080`) is normal: every LoadBalancer Service has one underneath, and the load balancer sends traffic to it, on EKS too. This is available on AWS only for now.
+
+`./down.sh` deletes every `LoadBalancer` Service on the managed clusters before Terraform destroys anything. Without that, load balancers created by Kubernetes would be left behind.
+
 ## Sharing the clusters
 
 Give a developer or tester access to every cluster in every sandbox:
@@ -189,6 +218,8 @@ up.sh / down.sh / lib.sh          entry points
 watch.sh                          live progress dashboard (started by up.sh / down.sh)
 status.sh / stop.sh               state of every sandbox / stop a background build
 setup.sh                          installs AWS CLI, Terraform, kubectl (up.sh runs it when needed)
+examples/web-demo/                public website demo: Traefik ingress + LoadBalancer + nginx
+k8s/aws-cloud-controller-manager.yaml   cloud controller for kubeadm clusters (<SANDBOX>_CLOUD_LB=1)
 labs.env.example                  template (labs.env is git-ignored)
 users.txt.example                 template for shared users (users.txt is git-ignored)
 access.sh                         users.txt -> accounts, firewall entries, share/ bundles

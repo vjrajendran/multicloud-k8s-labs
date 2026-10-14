@@ -134,6 +134,7 @@ tf_vars() {
     case $(cloud_of "$sb") in
         aws)
             v=$(cfg "$sb" REGION) && [[ -n $v ]] && printf '%s\n' -var "region=$v"
+            v=$(cfg "$sb" CLOUD_LB) && [[ $v == 1 || $v == true ]] && printf '%s\n' -var "cloud_lb=true"
             ;;
         azure)
             v=$(cfg "$sb" REGION) && [[ -n $v ]] && printf '%s\n' -var "location=$v"
