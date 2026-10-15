@@ -38,6 +38,7 @@ resource "aws_iam_role_policy_attachment" "node" {
     "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy",
     "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy",
     "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly",
+    "arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy", # EBS CSI driver runs with the node role
   ])
 
   role       = aws_iam_role.node.name
@@ -74,6 +75,23 @@ resource "aws_eks_cluster" "this" {
   depends_on = [aws_iam_role_policy_attachment.cluster]
 }
 
+# VPC CNI as a managed add-on with prefix delegation: a t3.medium otherwise
+# fits only 17 pods (one IP per pod from its ENIs); with /28 prefixes it's 110.
+# Created before the nodes so they start with the higher pod limit.
+resource "aws_eks_addon" "vpc_cni" {
+  cluster_name                = aws_eks_cluster.this.name
+  addon_name                  = "vpc-cni"
+  resolve_conflicts_on_create = "OVERWRITE"
+  resolve_conflicts_on_update = "OVERWRITE"
+
+  configuration_values = jsonencode({
+    env = {
+      ENABLE_PREFIX_DELEGATION = "true"
+      WARM_PREFIX_TARGET       = "1"
+    }
+  })
+}
+
 resource "aws_eks_node_group" "default" {
   cluster_name    = aws_eks_cluster.this.name
   node_group_name = "default"
@@ -87,5 +105,15 @@ resource "aws_eks_node_group" "default" {
     max_size     = var.node_count
   }
 
-  depends_on = [aws_iam_role_policy_attachment.node]
+  depends_on = [aws_iam_role_policy_attachment.node, aws_eks_addon.vpc_cni]
+}
+
+# EBS volumes for PersistentVolumeClaims (the "gp3" StorageClass comes from GitOps)
+resource "aws_eks_addon" "ebs_csi" {
+  cluster_name                = aws_eks_cluster.this.name
+  addon_name                  = "aws-ebs-csi-driver"
+  resolve_conflicts_on_create = "OVERWRITE"
+  resolve_conflicts_on_update = "OVERWRITE"
+
+  depends_on = [aws_eks_node_group.default]
 }

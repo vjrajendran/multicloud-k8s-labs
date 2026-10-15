@@ -51,3 +51,8 @@ variable "cloud_lb" {
   type        = bool
   default     = false
 }
+
+variable "vpc_cidr" {
+  description = "CIDR of the VPC - other clusters in it may reach this API server"
+  type        = string
+}

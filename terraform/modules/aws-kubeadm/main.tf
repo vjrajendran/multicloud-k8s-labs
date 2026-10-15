@@ -32,6 +32,14 @@ resource "aws_security_group" "k8s" {
   }
 
   ingress {
+    description = "Kubernetes API from inside the VPC (e.g. Argo CD on a hub cluster)"
+    from_port   = 6443
+    to_port     = 6443
+    protocol    = "tcp"
+    cidr_blocks = [var.vpc_cidr]
+  }
+
+  ingress {
     description = "All traffic between nodes of this cluster (kubelet, etcd, flannel VXLAN, NodePorts)"
     from_port   = 0
     to_port     = 0

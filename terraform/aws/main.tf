@@ -107,6 +107,7 @@ module "kubeadm" {
   repo_url             = var.repo_url
   repo_branch          = var.repo_branch
   cloud_lb             = var.cloud_lb
+  vpc_cidr             = data.aws_vpc.default.cidr_block
 
   depends_on = [terraform_data.capacity]
 }
